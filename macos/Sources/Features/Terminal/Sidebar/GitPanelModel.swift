@@ -42,6 +42,20 @@ final class GitPanelModel: ObservableObject {
         }
     }
 
+    /// False while this panel's tab is hidden behind another tab in the
+    /// group. Every tab has its own panel, so inactive ones drop their
+    /// watcher and skip refreshes; activating catches up with one refresh.
+    var isActive = true {
+        didSet {
+            guard isActive != oldValue else { return }
+            if isActive {
+                Task { await refresh() }
+            } else {
+                watcher = nil
+            }
+        }
+    }
+
     private var timer: Timer?
     private var isRefreshing = false
     private var needsRefresh = false
@@ -62,6 +76,7 @@ final class GitPanelModel: ObservableObject {
     // MARK: - Refresh
 
     func refresh() async {
+        guard isActive else { return }
         // Coalesce: a refresh requested mid-refresh runs once more at the end
         // instead of being dropped, so a watcher event can't be lost.
         if isRefreshing {
@@ -136,9 +151,33 @@ final class GitPanelModel: ObservableObject {
     /// the working tree and .git both land here; FSEvents coalesces bursts.
     private func startWatching(_ root: String) {
         guard watcher?.path != root else { return }
-        watcher = DirectoryWatcher(path: root) { [weak self] in
-            Task { @MainActor [weak self] in await self?.refresh() }
+        watcher = DirectoryWatcher(path: root) { [weak self] paths, mustRescan in
+            Task { @MainActor [weak self] in
+                await self?.handleChanges(paths, mustRescan: mustRescan, in: root)
+            }
         }
+    }
+
+    /// Refresh for a batch of changed paths unless every path is git-ignored,
+    /// so build output (zig-out, node_modules, ...) doesn't re-run git status
+    /// on every write.
+    private func handleChanges(_ paths: [String], mustRescan: Bool, in root: String) async {
+        guard isActive else { return }
+        let gitDir = (root as NSString).appendingPathComponent(".git")
+        let needsCheck = !mustRescan && !paths.isEmpty && !paths.contains {
+            $0 == gitDir || $0.hasPrefix(gitDir + "/")
+        }
+        if needsCheck {
+            let input = Data(paths.joined(separator: "\0").utf8)
+            let result = await Self.runGit(["check-ignore", "--stdin", "-z"], in: root, input: input)
+            // Exit 0: some paths ignored, 1: none, 128: error (e.g. a path
+            // outside the repo); only skip when every path came back ignored.
+            if result.code == 0 {
+                let ignored = Set(result.stdout.split(separator: "\0").map(String.init))
+                if paths.allSatisfy(ignored.contains) { return }
+            }
+        }
+        await refresh()
     }
 
     private func parseStatus(_ output: String) {
@@ -358,7 +397,9 @@ final class GitPanelModel: ObservableObject {
         return nil
     }
 
-    nonisolated private static func runGit(_ args: [String], in dir: String) async -> GitResult {
+    nonisolated private static func runGit(
+        _ args: [String], in dir: String, input: Data? = nil
+    ) async -> GitResult {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
@@ -374,7 +415,8 @@ final class GitPanelModel: ObservableObject {
                 let stderr = Pipe()
                 process.standardOutput = stdout
                 process.standardError = stderr
-                process.standardInput = FileHandle.nullDevice
+                let stdin = input.map { _ in Pipe() }
+                process.standardInput = stdin ?? FileHandle.nullDevice
 
                 do {
                     try process.run()
@@ -383,6 +425,15 @@ final class GitPanelModel: ObservableObject {
                         code: -1, stdout: "", stderr: error.localizedDescription
                     ))
                     return
+                }
+
+                // Feed stdin from another thread: git may fill the stdout
+                // pipe before it has read all of its input.
+                if let stdin, let input {
+                    DispatchQueue.global(qos: .utility).async {
+                        try? stdin.fileHandleForWriting.write(contentsOf: input)
+                        try? stdin.fileHandleForWriting.close()
+                    }
                 }
 
                 // Read before waiting so large output can't deadlock the pipe.
@@ -402,17 +453,19 @@ final class GitPanelModel: ObservableObject {
 
 // MARK: - DirectoryWatcher
 
-/// Watches a directory tree via FSEvents and invokes a callback when anything
-/// under it changes. Watching the repo root covers both the working tree and
+/// Watches a directory tree via FSEvents and invokes a callback with the
+/// changed file paths when anything under it changes. Watching the repo root covers both the working tree and
 /// .git, so edits, commits, and branch switches all trigger the callback.
 /// The FSEvents latency parameter coalesces bursts (e.g. a checkout touching
 /// hundreds of files) into a single callback.
 private final class DirectoryWatcher {
     let path: String
     private var stream: FSEventStreamRef?
-    private let onChange: () -> Void
+    /// Called with the batch's changed paths, and whether FSEvents dropped
+    /// events and the whole tree must be treated as changed.
+    private let onChange: ([String], Bool) -> Void
 
-    init?(path: String, onChange: @escaping () -> Void) {
+    init?(path: String, onChange: @escaping ([String], Bool) -> Void) {
         self.path = path
         self.onChange = onChange
 
@@ -420,16 +473,25 @@ private final class DirectoryWatcher {
         context.info = Unmanaged.passUnretained(self).toOpaque()
         guard let stream = FSEventStreamCreate(
             kCFAllocatorDefault,
-            { _, info, _, _, _, _ in
+            { _, info, count, eventPaths, eventFlags, _ in
                 guard let info else { return }
+                let paths = unsafeBitCast(eventPaths, to: NSArray.self) as? [String] ?? []
+                let mustRescan = (0..<count).contains {
+                    eventFlags[$0] & FSEventStreamEventFlags(
+                        kFSEventStreamEventFlagMustScanSubDirs) != 0
+                }
                 Unmanaged<DirectoryWatcher>.fromOpaque(info)
-                    .takeUnretainedValue().onChange()
+                    .takeUnretainedValue().onChange(paths, mustRescan)
             },
             &context,
             [path] as CFArray,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
             0.3,  // seconds of coalescing before events are delivered
-            FSEventStreamCreateFlags(kFSEventStreamCreateFlagNoDefer)
+            FSEventStreamCreateFlags(
+                kFSEventStreamCreateFlagNoDefer
+                    | kFSEventStreamCreateFlagUseCFTypes
+                    | kFSEventStreamCreateFlagFileEvents
+            )
         ) else { return nil }
 
         self.stream = stream

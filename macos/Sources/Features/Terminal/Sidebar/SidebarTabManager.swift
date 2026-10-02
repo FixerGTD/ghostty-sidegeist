@@ -51,7 +51,8 @@ class SidebarTabManager: ObservableObject {
     /// Derived from `bell-features` containing `attention`.
     private let bellTriggersAttention: Bool
 
-    private weak var window: NSWindow?
+    /// The window whose controller owns this manager.
+    private(set) weak var window: NSWindow?
     private var observers: [NSObjectProtocol] = []
     private var timer: Timer?
 
@@ -70,19 +71,33 @@ class SidebarTabManager: ObservableObject {
     private func setupObservers() {
         let center = NotificationCenter.default
 
-        let titleObserver = center.addObserver(
-            forName: NSWindow.didBecomeKeyNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in self?.refresh() }
-        observers.append(titleObserver)
+        // Key changes only matter for windows in our own tab group; anything
+        // else (a tab moving out, another window) is picked up by the poll.
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            let keyObserver = center.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                guard let self,
+                      let w = notification.object as? NSWindow,
+                      self.isInOwnGroup(w) else { return }
+                self.refresh()
+            }
+            observers.append(keyObserver)
+        }
 
-        let resignObserver = center.addObserver(
-            forName: NSWindow.didResignKeyNotification,
-            object: nil,
+        // Polling skips while our window is hidden, so catch up when it
+        // comes back into view.
+        let occlusionObserver = center.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: window,
             queue: .main
-        ) { [weak self] _ in self?.refresh() }
-        observers.append(resignObserver)
+        ) { [weak self] _ in
+            guard let self, self.isOnScreen else { return }
+            self.refresh()
+        }
+        observers.append(occlusionObserver)
 
         // Bell: respect bell-features config
         if bellTriggersAttention {
@@ -130,10 +145,29 @@ class SidebarTabManager: ObservableObject {
         }
         observers.append(ipcNotifObserver)
 
-        // Poll periodically for tab group changes, title changes, pwd changes, metadata changes.
+        // Poll periodically for tab group changes, title changes, pwd changes,
+        // metadata changes. Every tab window has its own manager listing the
+        // whole group, so only the one whose sidebar is on screen polls.
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.refresh()
+            guard let self, self.isOnScreen else { return }
+            self.refresh()
         }
+    }
+
+    /// Whether `w` is our window or shares its tab group.
+    private func isInOwnGroup(_ w: NSWindow) -> Bool {
+        guard let window else { return false }
+        if w === window { return true }
+        if let group = w.tabGroup { return group === window.tabGroup }
+        return false
+    }
+
+    /// Whether our window is the visible tab of its group and not fully
+    /// hidden (minimized, covered, or on another Space).
+    private var isOnScreen: Bool {
+        guard let window else { return false }
+        let selected = window.tabGroup?.selectedWindow ?? window
+        return selected === window && window.occlusionState.contains(.visible)
     }
 
     // MARK: - Attention
@@ -152,22 +186,46 @@ class SidebarTabManager: ObservableObject {
 
     // MARK: - Git Branch
 
+    /// HEAD file locations by pwd, shared by every manager so the walk up to
+    /// the repo root happens once per directory instead of on every poll.
+    /// A nil path means no repo was found at `checked`.
+    private static var headPathCache: [String: (path: String?, checked: Date)] = [:]
+
+    /// How long a "not in a repo" result is trusted before walking again,
+    /// so a later `git init` or clone still gets picked up.
+    private static let missingRepoRecheck: TimeInterval = 5
+
     /// Read the git branch from .git/HEAD in the given directory.
     /// Walks up to find the repo root (supports subdirectories).
     private func gitBranch(at pwd: String) -> String? {
+        if let cached = Self.headPathCache[pwd] {
+            if let path = cached.path {
+                if let contents = try? String(contentsOfFile: path, encoding: .utf8) {
+                    return Self.branch(fromHead: contents)
+                }
+                // Repo vanished; fall through and walk again.
+            } else if Date().timeIntervalSince(cached.checked) < Self.missingRepoRecheck {
+                return nil
+            }
+        }
+
         var dir = pwd
         while dir != "/" {
             let headPath = (dir as NSString).appendingPathComponent(".git/HEAD")
             if let contents = try? String(contentsOfFile: headPath, encoding: .utf8) {
-                let prefix = "ref: refs/heads/"
-                if contents.hasPrefix(prefix) {
-                    return contents.dropFirst(prefix.count).trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-                return nil // detached HEAD
+                Self.headPathCache[pwd] = (headPath, Date())
+                return Self.branch(fromHead: contents)
             }
             dir = (dir as NSString).deletingLastPathComponent
         }
+        Self.headPathCache[pwd] = (nil, Date())
         return nil
+    }
+
+    private static func branch(fromHead contents: String) -> String? {
+        let prefix = "ref: refs/heads/"
+        guard contents.hasPrefix(prefix) else { return nil } // detached HEAD
+        return contents.dropFirst(prefix.count).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Refresh

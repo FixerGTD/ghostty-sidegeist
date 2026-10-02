@@ -175,14 +175,15 @@ pub fn init(
         break :open open;
     };
 
-    // Our step to copy the app bundle to the install path.
-    // We have to use `cp -R` because there are symlinks in the
-    // bundle.
+    // Our step to copy the app bundle to the install path. The installed
+    // bundle is renamed so it can sit next to an upstream Ghostty.app.
+    // `ditto` copies the bundle's contents (keeping symlinks) into the
+    // destination, creating it if needed.
     const copy = copy: {
         const step = RunStep.create(b, "copy app bundle");
-        step.addArgs(&.{ "cp", "-R" });
+        step.addArgs(&.{"ditto"});
         step.addFileArg(b.path(app_path));
-        step.addArg(b.fmt("{s}", .{b.install_path}));
+        step.addArg(b.fmt("{s}/Ghostty-Sidegeist.app", .{b.install_path}));
         step.step.dependOn(&build.step);
         break :copy step;
     };

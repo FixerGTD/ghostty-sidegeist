@@ -13,7 +13,7 @@ A file for [guiding coding agents](https://agents.md/).
   - Real signing (vs ad-hoc) keeps TCC grants like notifications working
     across rebuilds. The identity must be in the keychain
     (`security find-identity -v -p codesigning`).
-  - Delete `zig-out/Ghostty.app` before rebuilding if that copy has been
+  - Delete `zig-out/Ghostty-Sidegeist.app` before rebuilding if that copy has been
     launched; rebuilding it in place gets the relaunch killed by macOS
     code-signing page caching.
 - **Test (Zig):** `zig build test`
@@ -38,6 +38,38 @@ A file for [guiding coding agents](https://agents.md/).
 - Shared Zig core: `src/`
 - macOS app: `macos/`
 - GTK (Linux and FreeBSD) app: `src/apprt/gtk`
+
+## Fork: Ghostty Sidegeist
+
+This repo is a personal macOS-only fork of Ghostty (`origin` is
+`FixerGTD/ghostty-sidegeist`, itself forked from
+`tomreinert/ghostty-sidegeist`; upstream is merged in periodically). Fork
+features live almost entirely in Swift; keep upstream files minimally
+touched so upstream merges stay clean.
+
+- **Sidebar** (`macos/Sources/Features/Terminal/Sidebar/`): replaces the
+  native tab bar. Tabs are still native `NSWindow` tab groups;
+  `TerminalWindow.sidebarActive` hides the system tab bar.
+  `SidebarTabManager` (one per `TerminalController`) builds `TabItem`s from
+  the window's tab group by polling every 0.5s plus window/bell/notification
+  observers. Drag-to-reorder, moving tabs between windows and detaching to a
+  new window are implemented there by re-ordering/re-parenting `NSWindow`s,
+  with care to keep window frames pinned.
+- **Git panel** (`GitPanelModel` / `GitPanelView`): shells out to `git` for
+  the selected tab's pwd, refreshed via FSEvents.
+- **IPC** (`macos/Sources/Features/Terminal/IPC/`): `GhosttyIPCServer` is a
+  Unix socket at `/tmp/ghostty-<uid>.sock` speaking newline-delimited JSON
+  (`{"method": "tab.rename", "params": {...}}`), started from
+  `AppDelegate`. `TabMetadataStore` holds per-surface status entries.
+  Each surface gets `GHOSTTY_SOCKET` and `GHOSTTY_TAB_ID` (surface UUID) env
+  vars (`BaseTerminalController`), which `cli/ghosttyctl` (bash) uses to
+  target its own tab. Adding a command means a new `case` in the server's
+  dispatch plus a subcommand in `cli/ghosttyctl`.
+- **Config**: fork options (`sidebar-fields`, `sidebar-git`) are declared in
+  `src/config/Config.zig` and read in `macos/Sources/Ghostty/Ghostty.Config.swift`;
+  the sidebar theme is derived from terminal background/foreground colors.
+- `README.md` documents only fork features; update it with user-visible
+  changes.
 
 ## Issue and PR Guidelines
 

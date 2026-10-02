@@ -5,7 +5,7 @@
 🧪 **Experimental**  
 Please note that this is experimental and I built it for my own use.
 
-📦 **[Download Ghostty Sidegeist for macOS](https://github.com/tomreinert/ghostty-sidegeist/releases/latest/download/Ghostty-Sidegeist.zip)**
+📦 **[Download Ghostty Sidegeist for macOS](https://github.com/FixerGTD/ghostty-sidegeist/releases/latest/download/Ghostty-Sidegeist.zip)**
 
 <img width="1125" height="749" alt="ghostty-sidebar" src="https://github.com/user-attachments/assets/919a9220-4e07-4b2e-b491-c9d385b6585f" />
 

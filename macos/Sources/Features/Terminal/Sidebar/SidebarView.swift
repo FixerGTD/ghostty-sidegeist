@@ -86,7 +86,11 @@ struct SidebarView: View {
             if let gitModel {
                 GitPanelView(model: gitModel, theme: theme)
                     .onReceive(tabManager.$tabs) { tabs in
-                        gitModel.pwd = tabs.first(where: { $0.isSelected })?.pwd
+                        let selected = tabs.first(where: { $0.isSelected })
+                        // Each tab window has its own panel; only the one
+                        // on screen keeps watching the repo.
+                        gitModel.isActive = selected?.window === tabManager.window
+                        gitModel.pwd = selected?.pwd
                     }
             }
         }
