@@ -9,13 +9,11 @@ A file for [guiding coding agents](https://agents.md/).
     `-Demit-macos-app=false` to skip building the app bundle and speed up
     compilation.
 - **Prod build (signed):**
-  `zig build -Doptimize=ReleaseFast '-Dmacos-codesign-identity=Apple Development: Tom Reinert (3L9RS877W3)'`
+  `zig build -Doptimize=ReleaseFast '-Dmacos-codesign-identity=<identity>'`
+  - `<identity>` is an "Apple Development: …" name from
+    `security find-identity -v -p codesigning`.
   - Real signing (vs ad-hoc) keeps TCC grants like notifications working
-    across rebuilds. The identity must be in the keychain
-    (`security find-identity -v -p codesigning`).
-  - Delete `zig-out/Ghostty-Sidegeist.app` before rebuilding if that copy has been
-    launched; rebuilding it in place gets the relaunch killed by macOS
-    code-signing page caching.
+    across rebuilds.
 - **Test (Zig):** `zig build test`
   - Prefer to run targeted tests with `-Dtest-filter` because the full
     test suite is slow to run.

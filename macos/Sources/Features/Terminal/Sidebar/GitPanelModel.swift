@@ -150,10 +150,18 @@ final class GitPanelModel: ObservableObject {
     /// (Re)start the FSEvents watcher when the repo root changes. Events from
     /// the working tree and .git both land here; FSEvents coalesces bursts.
     private func startWatching(_ root: String) {
-        guard watcher?.path != root else { return }
-        watcher = DirectoryWatcher(path: root) { [weak self] paths, mustRescan in
+        // FSEvents reports real paths (/private/tmp, not /tmp), so watch and
+        // compare against the resolved root. Foundation's
+        // resolvingSymlinksInPath strips /private, so use realpath(3).
+        let resolved = root.withCString { realpath($0, nil) }
+            .map { path in
+                defer { free(path) }
+                return String(cString: path)
+            } ?? root
+        guard watcher?.path != resolved else { return }
+        watcher = DirectoryWatcher(path: resolved) { [weak self] paths, mustRescan in
             Task { @MainActor [weak self] in
-                await self?.handleChanges(paths, mustRescan: mustRescan, in: root)
+                await self?.handleChanges(paths, mustRescan: mustRescan, in: resolved)
             }
         }
     }
@@ -454,8 +462,9 @@ final class GitPanelModel: ObservableObject {
 // MARK: - DirectoryWatcher
 
 /// Watches a directory tree via FSEvents and invokes a callback with the
-/// changed file paths when anything under it changes. Watching the repo root covers both the working tree and
-/// .git, so edits, commits, and branch switches all trigger the callback.
+/// changed file paths when anything under it changes. Watching the repo
+/// root covers both the working tree and .git, so edits, commits, and
+/// branch switches all trigger the callback.
 /// The FSEvents latency parameter coalesces bursts (e.g. a checkout touching
 /// hundreds of files) into a single callback.
 private final class DirectoryWatcher {

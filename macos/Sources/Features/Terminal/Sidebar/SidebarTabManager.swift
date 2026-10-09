@@ -191,22 +191,28 @@ class SidebarTabManager: ObservableObject {
     /// A nil path means no repo was found at `checked`.
     private static var headPathCache: [String: (path: String?, checked: Date)] = [:]
 
-    /// How long a "not in a repo" result is trusted before walking again,
-    /// so a later `git init` or clone still gets picked up.
-    private static let missingRepoRecheck: TimeInterval = 5
+    /// How long a cached lookup is trusted before walking again, so a later
+    /// `git init`, clone, or nested repo still gets picked up.
+    private static let headPathRecheck: TimeInterval = 5
+
+    /// Cache size at which it is cleared, so pwds of long-gone tabs don't
+    /// pile up.
+    private static let headPathCacheLimit = 256
 
     /// Read the git branch from .git/HEAD in the given directory.
     /// Walks up to find the repo root (supports subdirectories).
     private func gitBranch(at pwd: String) -> String? {
-        if let cached = Self.headPathCache[pwd] {
-            if let path = cached.path {
-                if let contents = try? String(contentsOfFile: path, encoding: .utf8) {
-                    return Self.branch(fromHead: contents)
-                }
-                // Repo vanished; fall through and walk again.
-            } else if Date().timeIntervalSince(cached.checked) < Self.missingRepoRecheck {
-                return nil
+        if let cached = Self.headPathCache[pwd],
+           Date().timeIntervalSince(cached.checked) < Self.headPathRecheck {
+            guard let path = cached.path else { return nil }
+            if let contents = try? String(contentsOfFile: path, encoding: .utf8) {
+                return Self.branch(fromHead: contents)
             }
+            // Repo vanished; fall through and walk again.
+        }
+
+        if Self.headPathCache.count >= Self.headPathCacheLimit {
+            Self.headPathCache.removeAll()
         }
 
         var dir = pwd
